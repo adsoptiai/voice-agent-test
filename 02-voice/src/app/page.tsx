@@ -8,7 +8,6 @@ export default function Home() {
   const [isListening, setIsListening] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [messages, setMessages] = useState<Array<{role: string, content: string}>>([]);
-  const [isProcessing, setIsProcessing] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioStream = useRef<MediaStream | null>(null);
@@ -28,7 +27,7 @@ export default function Home() {
 
       // 2. 建立 WebSocket 連接
       // Browser WebSocket 不支援自定義 headers，必須使用 subprotocol 傳遞 token
-      const url = `wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01`;
+      const url = `wss://api.openai.com/v1/realtime?model=gpt-realtime`;
 
       // 使用 OpenAI 的 ephemeral key 格式作為 subprotocol
       const ws = new WebSocket(url, [
@@ -46,7 +45,7 @@ export default function Home() {
           session: {
             modalities: ["text", "audio"],
             instructions: "You are a helpful assistant.",
-            voice: "alloy",
+            voice: "shimmer",
             input_audio_format: "pcm16",
             output_audio_format: "pcm16",
             input_audio_transcription: {
@@ -74,12 +73,10 @@ export default function Home() {
           updateMessages("user", data.transcript);
         } else if (data.type === "response.done") {
           // 回應完成
-          setIsProcessing(false);
           console.log("Response completed");
         } else if (data.type === "error") {
           console.error("Server error:", data.error);
           setError(data.error.message);
-          setIsProcessing(false);
         }
       };
 
@@ -124,7 +121,7 @@ export default function Home() {
       const processor = audioContext.createScriptProcessor(4096, 1, 1);
 
       processor.onaudioprocess = (e) => {
-        if (wsRef.current?.readyState === WebSocket.OPEN && !isProcessing) {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
           const inputData = e.inputBuffer.getChannelData(0);
           // 轉換為 PCM16
           const pcm16 = convertToPCM16(inputData);
@@ -183,7 +180,6 @@ export default function Home() {
       isPlayingRef.current = false;
       return;
     }
-
     isPlayingRef.current = true;
     const audioContext = audioContextRef.current;
 
@@ -213,29 +209,6 @@ export default function Home() {
     }
 
     isPlayingRef.current = false;
-  }
-
-  function sendResponse() {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      return;
-    }
-
-    setIsProcessing(true);
-
-    // 提交音訊緩衝區
-    wsRef.current.send(JSON.stringify({
-      type: "input_audio_buffer.commit"
-    }));
-
-    // 創建回應
-    wsRef.current.send(JSON.stringify({
-      type: "response.create",
-      response: {
-        modalities: ["text", "audio"]
-      }
-    }));
-
-    console.log("Requested response from assistant");
   }
 
   function updateMessages(role: string, content: string) {
@@ -282,24 +255,10 @@ export default function Home() {
         </button>
 
         {connected && (
-          <>
-            <button
-              onClick={sendResponse}
-              disabled={isProcessing}
-              className={`px-6 py-3 rounded-md font-medium transition-colors ${
-                isProcessing
-                  ? "bg-gray-400 text-white cursor-not-allowed"
-                  : "bg-blue-500 text-white hover:bg-blue-600"
-              }`}
-            >
-              {isProcessing ? "Processing..." : "Send"}
-            </button>
-
-            <span className={`inline-flex items-center ${isListening ? "text-green-500" : "text-gray-500"}`}>
-              <span className={`w-3 h-3 rounded-full mr-2 ${isListening ? "bg-green-500 animate-pulse" : "bg-gray-400"}`} />
-              {isListening ? "Listening..." : "Ready"}
-            </span>
-          </>
+          <span className={`inline-flex items-center ${isListening ? "text-green-500" : "text-gray-500"}`}>
+            <span className={`w-3 h-3 rounded-full mr-2 ${isListening ? "bg-green-500 animate-pulse" : "bg-gray-400"}`} />
+            {isListening ? "Listening..." : "Ready"}
+          </span>
         )}
       </div>
 
@@ -324,7 +283,7 @@ export default function Home() {
           ))}
           {messages.length === 0 && (
             <p className="text-gray-500 text-center mt-8">
-              Press Connect, speak your message, then press Send to get a response
+              Press Connect and start speaking to begin the conversation
             </p>
           )}
         </div>
