@@ -1,0 +1,16 @@
+{
+  "private": true,
+  "name": "01-basic",
+  "type": "module",
+  "scripts": {
+    "start": "tsx index.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.4"
+  },
+  "dependencies": {
+    "@openai/agents": "latest",
+    "dotenv": "^17.2.3",
+    "zod": "^3.25.49"
+  }
+}

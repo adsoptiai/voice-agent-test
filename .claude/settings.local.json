@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install)",
+      "Bash(dir /b /s *.config.js *.tsx *.ts 2)",
+      "Bash(nul)",
+      "Bash(findstr:*)",
+      "Bash(git init:*)",
+      "Bash(git add:*)",
+      "Bash(dir:*)",
+      "Bash(rm \"02-voice/nul\" 2)",
+      "Bash(del \"02-voice\\nul\" 2)",
+      "Bash(git rm:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
