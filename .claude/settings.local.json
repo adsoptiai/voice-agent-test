@@ -10,7 +10,11 @@
       "Bash(dir:*)",
       "Bash(rm \"02-voice/nul\" 2)",
       "Bash(del \"02-voice\\nul\" 2)",
-      "Bash(git rm:*)"
+      "Bash(git rm:*)",
+      "Bash(git commit -m \"$(cat <<''EOF''\nInitialize OpenAI voice agents workshop with WebSocket implementation\n\nSet up workshop project structure with basic text-based agent (01-basic) and Next.js voice agent (02-voice). Implemented working WebSocket-based voice agent after resolving WebRTC connection issues. Added comprehensive debugging documentation in update files.\n\nKey features:\n- Basic text-based agent implementation using OpenAI Agents SDK\n- Next.js voice agent with real-time audio streaming via WebSocket\n- Server-side token generation with proper authentication\n- Client-side audio processing with PCM16 format conversion\n- Fixed WebRTC ''setRemoteDescription'' error by switching to direct WebSocket connection\n- Documented complete debugging process and solutions\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(git commit:*)",
+      "Bash(git remote add:*)",
+      "Bash(git push:*)"
     ],
     "deny": [],
     "ask": []

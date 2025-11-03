@@ -14,6 +14,10 @@ export default function Home() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioQueueRef = useRef<Int16Array[]>([]);
   const isPlayingRef = useRef(false);
+  const isAssistantSpeakingRef = useRef(false);
+  const currentAudioSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const lastInterruptTimeRef = useRef(0);
+  const speechFramesRef = useRef(0);
 
   async function connectWithWebSocket() {
     try {
@@ -44,12 +48,23 @@ export default function Home() {
           type: "session.update",
           session: {
             modalities: ["text", "audio"],
-            instructions: "You are a helpful assistant.",
+            instructions:
+            `You are a helpful assistant. You speak traditional chinese well. You also have Taiwan accent.
+            Voice: Warm, empathetic, and professional, engaging reassuring the customer that their issue is understood and will be resolved.
+            Punctuation: Well-structured with natural pauses, allowing for clarity and a steady, calming flow.
+            Delivery: Calm and patient, with a supportive and understanding tone that reassures the listener, with a lively and playful tone.
+            `,
             voice: "shimmer",
             input_audio_format: "pcm16",
             output_audio_format: "pcm16",
             input_audio_transcription: {
               model: "whisper-1"
+            },
+            turn_detection: {
+              type: "server_vad",
+              threshold: 0.5,
+              prefix_padding_ms: 300,
+              silence_duration_ms: 200
             }
           }
         }));
@@ -62,8 +77,21 @@ export default function Home() {
         const data = JSON.parse(event.data);
         console.log("Received:", data.type, data);
 
-        if (data.type === "response.audio.delta") {
+        if (data.type === "session.created" || data.type === "session.updated") {
+          console.log("Session configured:", data);
+        } else if (data.type === "input_audio_buffer.speech_started") {
+          console.log("User started speaking");
+        } else if (data.type === "input_audio_buffer.speech_stopped") {
+          console.log("User stopped speaking");
+        } else if (data.type === "input_audio_buffer.committed") {
+          console.log("Audio buffer committed");
+        } else if (data.type === "conversation.item.created") {
+          console.log("Conversation item created:", data.item);
+        } else if (data.type === "response.created") {
+          console.log("Response created, assistant will speak");
+        } else if (data.type === "response.audio.delta") {
           // 處理音訊回應
+          isAssistantSpeakingRef.current = true;
           playAudioDelta(data.delta);
         } else if (data.type === "response.audio_transcript.delta") {
           // 處理助理的轉寫文字
@@ -74,6 +102,10 @@ export default function Home() {
         } else if (data.type === "response.done") {
           // 回應完成
           console.log("Response completed");
+          isAssistantSpeakingRef.current = false;
+        } else if (data.type === "response.audio.done") {
+          // 音訊播放完成
+          isAssistantSpeakingRef.current = false;
         } else if (data.type === "error") {
           console.error("Server error:", data.error);
           setError(data.error.message);
@@ -96,6 +128,40 @@ export default function Home() {
     } catch (error) {
       console.error("Connection error:", error);
       setError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function interrupt() {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      const now = Date.now();
+      // Prevent rapid successive interruptions (cooldown: 1 second)
+      if (now - lastInterruptTimeRef.current < 1000) {
+        return;
+      }
+      lastInterruptTimeRef.current = now;
+
+      console.log("Interrupting assistant...");
+
+      // Cancel the current response
+      wsRef.current.send(JSON.stringify({
+        type: "response.cancel"
+      }));
+
+      // Stop current audio playback
+      if (currentAudioSourceRef.current) {
+        try {
+          currentAudioSourceRef.current.stop();
+          currentAudioSourceRef.current = null;
+        } catch (e) {
+          // Already stopped
+        }
+      }
+
+      // Clear audio queue
+      audioQueueRef.current = [];
+      isPlayingRef.current = false;
+      isAssistantSpeakingRef.current = false;
+      speechFramesRef.current = 0;
     }
   }
 
@@ -123,6 +189,28 @@ export default function Home() {
       processor.onaudioprocess = (e) => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {
           const inputData = e.inputBuffer.getChannelData(0);
+
+          // TEMPORARILY DISABLED: Calculate audio level to detect speech
+          // let sum = 0;
+          // for (let i = 0; i < inputData.length; i++) {
+          //   sum += Math.abs(inputData[i]);
+          // }
+          // const average = sum / inputData.length;
+
+          // TEMPORARILY DISABLED: Detect sustained speech before interrupting
+          // Higher threshold (0.05) and requires 3 consecutive frames
+          // if (isAssistantSpeakingRef.current) {
+          //   if (average > 0.05) {
+          //     speechFramesRef.current++;
+          //     // Only interrupt after detecting speech for 3 consecutive frames (~300ms)
+          //     if (speechFramesRef.current >= 3) {
+          //       interrupt();
+          //     }
+          //   } else {
+          //     speechFramesRef.current = 0;
+          //   }
+          // }
+
           // 轉換為 PCM16
           const pcm16 = convertToPCM16(inputData);
 
@@ -200,12 +288,20 @@ export default function Home() {
       const source = audioContext.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(audioContext.destination);
+
+      // Store reference to current source for interruption
+      currentAudioSourceRef.current = source;
       source.start();
 
       // 等待播放完成
       await new Promise(resolve => {
         source.onended = resolve;
       });
+
+      // Clear reference after playback
+      if (currentAudioSourceRef.current === source) {
+        currentAudioSourceRef.current = null;
+      }
     }
 
     isPlayingRef.current = false;
@@ -225,12 +321,17 @@ export default function Home() {
   async function onConnect() {
     if (connected) {
       // 斷開連接
+      interrupt(); // Stop any ongoing playback
       if (audioStream.current) {
         audioStream.current.getTracks().forEach(track => track.stop());
+      }
+      if (audioContextRef.current) {
+        audioContextRef.current.close();
       }
       wsRef.current?.close();
       setConnected(false);
       setIsListening(false);
+      isAssistantSpeakingRef.current = false;
     } else {
       // 建立連接
       setError(null);
