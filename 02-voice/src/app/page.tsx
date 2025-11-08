@@ -1,11 +1,37 @@
 "use client";
 
+/**
+ * OpenAI Realtime Voice Agent with Barge-In Support
+ * 
+ * Features:
+ * - WebSocket connection to OpenAI Realtime API
+ * - Real-time audio streaming (PCM16 @ 24kHz)
+ * - Automatic barge-in/interrupt detection
+ * - Server-side VAD (Voice Activity Detection)
+ * - Bi-directional audio transcription
+ * 
+ * Barge-In Implementation:
+ * 1. Monitors microphone input level while assistant is speaking
+ * 2. When user speech detected (threshold: 0.02, 2 consecutive frames ~200ms):
+ *    - Sends `response.cancel` to stop current response
+ *    - Sends `output_audio_buffer.clear` to clear queued audio
+ *    - Stops local audio playback immediately
+ *    - Clears local audio queue
+ * 3. Server VAD automatically detects user speech end and creates new response
+ * 4. Cooldown period (500ms) prevents rapid re-triggering
+ * 
+ * Manual Interrupt:
+ * - Click the "Interrupt" button to manually stop assistant mid-speech
+ * - Useful for testing or when automatic detection doesn't trigger
+ */
+
 import { useRef, useState, useEffect } from "react";
 import { getSessionToken } from "./server/token";
 
 export default function Home() {
   const [connected, setConnected] = useState(false);
   const [isListening, setIsListening] = useState(false);
+  const [isAssistantSpeaking, setIsAssistantSpeaking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [messages, setMessages] = useState<Array<{role: string, content: string}>>([]);
 
@@ -31,7 +57,7 @@ export default function Home() {
 
       // 2. 建立 WebSocket 連接
       // Browser WebSocket 不支援自定義 headers，必須使用 subprotocol 傳遞 token
-      const url = `wss://api.openai.com/v1/realtime?model=gpt-realtime`;
+      const url = `wss://api.openai.com/v1/realtime?model=gpt-realtime-mini`;
 
       // 使用 OpenAI 的 ephemeral key 格式作為 subprotocol
       const ws = new WebSocket(url, [
@@ -52,7 +78,7 @@ export default function Home() {
             `You are a helpful assistant. You speak traditional chinese well. You also have Taiwan accent.
             Voice: Warm, empathetic, and professional, engaging reassuring the customer that their issue is understood and will be resolved.
             Punctuation: Well-structured with natural pauses, allowing for clarity and a steady, calming flow.
-            Delivery: Calm and patient, with a supportive and understanding tone that reassures the listener, with a lively and playful tone.
+            Delivery: Supportive and understanding tone that reassures the listener, with a lively and playful tone.
             `,
             voice: "shimmer",
             input_audio_format: "pcm16",
@@ -80,15 +106,18 @@ export default function Home() {
         if (data.type === "session.created" || data.type === "session.updated") {
           console.log("Session configured:", data);
         } else if (data.type === "input_audio_buffer.speech_started") {
-          console.log("User started speaking");
+          console.log("🎤 User started speaking");
+          setIsListening(true);
         } else if (data.type === "input_audio_buffer.speech_stopped") {
-          console.log("User stopped speaking");
+          console.log("🔇 User stopped speaking");
         } else if (data.type === "input_audio_buffer.committed") {
-          console.log("Audio buffer committed");
+          console.log("✅ Audio buffer committed - creating response");
         } else if (data.type === "conversation.item.created") {
           console.log("Conversation item created:", data.item);
         } else if (data.type === "response.created") {
-          console.log("Response created, assistant will speak");
+          console.log("🤖 Response created, assistant will speak");
+          isAssistantSpeakingRef.current = true;
+          setIsAssistantSpeaking(true);
         } else if (data.type === "response.audio.delta") {
           // 處理音訊回應
           isAssistantSpeakingRef.current = true;
@@ -101,11 +130,19 @@ export default function Home() {
           updateMessages("user", data.transcript);
         } else if (data.type === "response.done") {
           // 回應完成
-          console.log("Response completed");
+          console.log("✅ Response completed");
           isAssistantSpeakingRef.current = false;
+          setIsAssistantSpeaking(false);
         } else if (data.type === "response.audio.done") {
           // 音訊播放完成
+          console.log("🔊 Audio playback done");
           isAssistantSpeakingRef.current = false;
+          setIsAssistantSpeaking(false);
+        } else if (data.type === "response.cancelled") {
+          // Response was cancelled (barge-in)
+          console.log("🛑 Response cancelled");
+          isAssistantSpeakingRef.current = false;
+          setIsAssistantSpeaking(false);
         } else if (data.type === "error") {
           console.error("Server error:", data.error);
           setError(data.error.message);
@@ -134,20 +171,25 @@ export default function Home() {
   function interrupt() {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       const now = Date.now();
-      // Prevent rapid successive interruptions (cooldown: 1 second)
-      if (now - lastInterruptTimeRef.current < 1000) {
+      // Prevent rapid successive interruptions (cooldown: 500ms)
+      if (now - lastInterruptTimeRef.current < 500) {
         return;
       }
       lastInterruptTimeRef.current = now;
 
-      console.log("Interrupting assistant...");
+      console.log("🛑 Barge-in: Interrupting assistant...");
 
-      // Cancel the current response
+      // 1. Cancel the current response
       wsRef.current.send(JSON.stringify({
         type: "response.cancel"
       }));
 
-      // Stop current audio playback
+      // 2. Clear the output audio buffer (prevents queued audio from playing)
+      wsRef.current.send(JSON.stringify({
+        type: "output_audio_buffer.clear"
+      }));
+
+      // 3. Stop current audio playback immediately
       if (currentAudioSourceRef.current) {
         try {
           currentAudioSourceRef.current.stop();
@@ -157,11 +199,13 @@ export default function Home() {
         }
       }
 
-      // Clear audio queue
+      // 4. Clear local audio queue
       audioQueueRef.current = [];
       isPlayingRef.current = false;
       isAssistantSpeakingRef.current = false;
       speechFramesRef.current = 0;
+
+      console.log("✅ Interrupt complete - ready for new input");
     }
   }
 
@@ -190,26 +234,34 @@ export default function Home() {
         if (wsRef.current?.readyState === WebSocket.OPEN) {
           const inputData = e.inputBuffer.getChannelData(0);
 
-          // TEMPORARILY DISABLED: Calculate audio level to detect speech
-          // let sum = 0;
-          // for (let i = 0; i < inputData.length; i++) {
-          //   sum += Math.abs(inputData[i]);
-          // }
-          // const average = sum / inputData.length;
+          // Calculate audio level to detect speech
+          let sum = 0;
+          for (let i = 0; i < inputData.length; i++) {
+            sum += Math.abs(inputData[i]);
+          }
+          const average = sum / inputData.length;
 
-          // TEMPORARILY DISABLED: Detect sustained speech before interrupting
-          // Higher threshold (0.05) and requires 3 consecutive frames
-          // if (isAssistantSpeakingRef.current) {
-          //   if (average > 0.05) {
-          //     speechFramesRef.current++;
-          //     // Only interrupt after detecting speech for 3 consecutive frames (~300ms)
-          //     if (speechFramesRef.current >= 3) {
-          //       interrupt();
-          //     }
-          //   } else {
-          //     speechFramesRef.current = 0;
-          //   }
-          // }
+          // Detect sustained speech before interrupting
+          // Threshold: 0.02 (lower = more sensitive)
+          // Requires 2 consecutive frames (~200ms) to avoid false positives
+          if (isAssistantSpeakingRef.current) {
+            if (average > 0.02) {
+              speechFramesRef.current++;
+              // Only interrupt after detecting speech for 2 consecutive frames
+              if (speechFramesRef.current >= 2) {
+                console.log(`🎤 User speech detected (level: ${average.toFixed(4)}) - triggering barge-in`);
+                interrupt();
+              }
+            } else {
+              // Reset counter if audio drops below threshold
+              if (speechFramesRef.current > 0) {
+                speechFramesRef.current = Math.max(0, speechFramesRef.current - 1);
+              }
+            }
+          } else {
+            // Not speaking, reset counter
+            speechFramesRef.current = 0;
+          }
 
           // 轉換為 PCM16
           const pcm16 = convertToPCM16(inputData);
@@ -331,6 +383,7 @@ export default function Home() {
       wsRef.current?.close();
       setConnected(false);
       setIsListening(false);
+      setIsAssistantSpeaking(false);
       isAssistantSpeakingRef.current = false;
     } else {
       // 建立連接
@@ -356,10 +409,32 @@ export default function Home() {
         </button>
 
         {connected && (
-          <span className={`inline-flex items-center ${isListening ? "text-green-500" : "text-gray-500"}`}>
-            <span className={`w-3 h-3 rounded-full mr-2 ${isListening ? "bg-green-500 animate-pulse" : "bg-gray-400"}`} />
-            {isListening ? "Listening..." : "Ready"}
-          </span>
+          <>
+            <button
+              onClick={interrupt}
+              disabled={!isAssistantSpeaking}
+              className={`px-4 py-2 rounded-md font-medium transition-colors ${
+                isAssistantSpeaking
+                  ? "bg-orange-500 text-white hover:bg-orange-600"
+                  : "bg-gray-300 text-gray-500 cursor-not-allowed"
+              }`}
+              title="Manually interrupt the assistant (or just start speaking)"
+            >
+              🛑 Interrupt
+            </button>
+
+            <span className={`inline-flex items-center ${isListening ? "text-green-500" : "text-gray-500"}`}>
+              <span className={`w-3 h-3 rounded-full mr-2 ${isListening ? "bg-green-500 animate-pulse" : "bg-gray-400"}`} />
+              {isListening ? "Listening..." : "Ready"}
+            </span>
+
+            {isAssistantSpeaking && (
+              <span className="inline-flex items-center text-blue-500">
+                <span className="w-3 h-3 rounded-full mr-2 bg-blue-500 animate-pulse" />
+                Assistant Speaking
+              </span>
+            )}
+          </>
         )}
       </div>
 
