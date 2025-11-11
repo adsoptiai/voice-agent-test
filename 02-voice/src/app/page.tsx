@@ -12,13 +12,13 @@
  * 
  * Barge-In Implementation:
  * 1. Monitors microphone input level while assistant is speaking
- * 2. When user speech detected (threshold: 0.02, 2 consecutive frames ~200ms):
+ * 2. When user speech detected (configured threshold and consecutive frames):
  *    - Sends `response.cancel` to stop current response
  *    - Sends `output_audio_buffer.clear` to clear queued audio
  *    - Stops local audio playback immediately
  *    - Clears local audio queue
  * 3. Server VAD automatically detects user speech end and creates new response
- * 4. Cooldown period (500ms) prevents rapid re-triggering
+ * 4. Cooldown period prevents rapid re-triggering
  * 
  * Manual Interrupt:
  * - Click the "Interrupt" button to manually stop assistant mid-speech
@@ -27,11 +27,14 @@
 
 import { useRef, useState, useEffect } from "react";
 import { getSessionToken } from "./server/token";
+import { REALTIME_CONFIG } from "@/config/realtime";
+import { mcpClient } from "@/lib/mcpClient";
 
 export default function Home() {
   const [connected, setConnected] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [isAssistantSpeaking, setIsAssistantSpeaking] = useState(false);
+  const [isResearching, setIsResearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [messages, setMessages] = useState<Array<{role: string, content: string}>>([]);
 
@@ -44,6 +47,73 @@ export default function Home() {
   const currentAudioSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const lastInterruptTimeRef = useRef(0);
   const speechFramesRef = useRef(0);
+  const functionCallArgsRef = useRef<string>("");
+  const functionCallNameRef = useRef<string>("");
+
+  async function handleFunctionCall(callId: string, name: string, argsJson: string) {
+    console.log("🔧 Executing function:", name);
+    setIsResearching(true);
+
+    try {
+      const args = JSON.parse(argsJson);
+      let result;
+
+      if (name === "deep_research") {
+        console.log("🔍 Starting deep research:", args.query);
+        updateMessages("system", `🔍 Researching: ${args.query}...`);
+        result = await mcpClient.deepResearch(args.query);
+      } else if (name === "quick_search") {
+        console.log("🔍 Starting quick search:", args.query);
+        updateMessages("system", `🔍 Searching: ${args.query}...`);
+        result = await mcpClient.quickSearch(args.query);
+      } else {
+        throw new Error(`Unknown function: ${name}`);
+      }
+
+      console.log("✅ Function result:", result);
+      setIsResearching(false);
+
+      // Send the result back to the Realtime API
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "function_call_output",
+            call_id: callId,
+            output: JSON.stringify(result)
+          }
+        }));
+
+        // Request a new response based on the function result
+        wsRef.current.send(JSON.stringify({
+          type: "response.create"
+        }));
+      }
+    } catch (error) {
+      console.error("❌ Function call error:", error);
+      setIsResearching(false);
+
+      // Send error back to the API
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "function_call_output",
+            call_id: callId,
+            output: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : String(error)
+            })
+          }
+        }));
+
+        // Request a new response
+        wsRef.current.send(JSON.stringify({
+          type: "response.create"
+        }));
+      }
+    }
+  }
 
   async function connectWithWebSocket() {
     try {
@@ -57,7 +127,7 @@ export default function Home() {
 
       // 2. 建立 WebSocket 連接
       // Browser WebSocket 不支援自定義 headers，必須使用 subprotocol 傳遞 token
-      const url = `wss://api.openai.com/v1/realtime?model=gpt-realtime-mini`;
+      const url = REALTIME_CONFIG.getWebSocketUrl();
 
       // 使用 OpenAI 的 ephemeral key 格式作為 subprotocol
       const ws = new WebSocket(url, [
@@ -69,29 +139,25 @@ export default function Home() {
       ws.onopen = () => {
         console.log("WebSocket connected");
 
-        // 送出初始設定
+        // 送出初始設定 (with tools)
         ws.send(JSON.stringify({
           type: "session.update",
           session: {
             modalities: ["text", "audio"],
-            instructions:
-            `You are a helpful assistant. You speak traditional chinese well. You also have Taiwan accent.
-            Voice: Warm, empathetic, and professional, engaging reassuring the customer that their issue is understood and will be resolved.
-            Punctuation: Well-structured with natural pauses, allowing for clarity and a steady, calming flow.
-            Delivery: Supportive and understanding tone that reassures the listener, with a lively and playful tone.
-            `,
-            voice: "shimmer",
-            input_audio_format: "pcm16",
-            output_audio_format: "pcm16",
+            instructions: REALTIME_CONFIG.instructions,
+            voice: REALTIME_CONFIG.voice,
+            input_audio_format: REALTIME_CONFIG.audioFormat,
+            output_audio_format: REALTIME_CONFIG.audioFormat,
             input_audio_transcription: {
               model: "whisper-1"
             },
             turn_detection: {
-              type: "server_vad",
-              threshold: 0.5,
-              prefix_padding_ms: 300,
-              silence_duration_ms: 200
-            }
+              type: REALTIME_CONFIG.vad.type,
+              threshold: REALTIME_CONFIG.vad.threshold,
+              prefix_padding_ms: REALTIME_CONFIG.vad.prefixPaddingMs,
+              silence_duration_ms: REALTIME_CONFIG.vad.silenceDurationMs
+            },
+            tools: REALTIME_CONFIG.tools
           }
         }));
 
@@ -143,6 +209,23 @@ export default function Home() {
           console.log("🛑 Response cancelled");
           isAssistantSpeakingRef.current = false;
           setIsAssistantSpeaking(false);
+        } else if (data.type === "response.function_call_arguments.delta") {
+          // Function call arguments are being received
+          functionCallArgsRef.current += data.delta;
+          console.log("📞 Function call args delta:", data.delta);
+        } else if (data.type === "response.function_call_arguments.done") {
+          // Function call arguments complete, execute the function
+          const callId = data.call_id;
+          const name = data.name;
+          const args = functionCallArgsRef.current;
+
+          console.log("📞 Function call complete:", { name, args, callId });
+
+          // Reset for next call
+          functionCallArgsRef.current = "";
+
+          // Execute the function asynchronously
+          handleFunctionCall(callId, name, args);
         } else if (data.type === "error") {
           console.error("Server error:", data.error);
           setError(data.error.message);
@@ -242,13 +325,12 @@ export default function Home() {
           const average = sum / inputData.length;
 
           // Detect sustained speech before interrupting
-          // Threshold: 0.02 (lower = more sensitive)
-          // Requires 2 consecutive frames (~200ms) to avoid false positives
+          // Uses REALTIME_CONFIG.bargeIn settings
           if (isAssistantSpeakingRef.current) {
-            if (average > 0.02) {
+            if (average > REALTIME_CONFIG.bargeIn.speechThreshold) {
               speechFramesRef.current++;
-              // Only interrupt after detecting speech for 2 consecutive frames
-              if (speechFramesRef.current >= 2) {
+              // Only interrupt after detecting speech for configured consecutive frames
+              if (speechFramesRef.current >= REALTIME_CONFIG.bargeIn.consecutiveFrames) {
                 console.log(`🎤 User speech detected (level: ${average.toFixed(4)}) - triggering barge-in`);
                 interrupt();
               }
@@ -434,6 +516,13 @@ export default function Home() {
                 Assistant Speaking
               </span>
             )}
+
+            {isResearching && (
+              <span className="inline-flex items-center text-purple-500">
+                <span className="w-3 h-3 rounded-full mr-2 bg-purple-500 animate-pulse" />
+                Researching...
+              </span>
+            )}
           </>
         )}
       </div>
@@ -449,12 +538,16 @@ export default function Home() {
         <div className="space-y-2">
           {messages.map((msg, index) => (
             <div key={index} className={`p-3 rounded-md ${
-              msg.role === "user" ? "bg-blue-50 ml-8" : "bg-gray-50 mr-8"
+              msg.role === "user" ? "bg-blue-50 ml-8" :
+              msg.role === "system" ? "bg-purple-50 text-purple-700 text-center italic" :
+              "bg-gray-50 mr-8"
             }`}>
-              <span className="font-medium">
-                {msg.role === "user" ? "You" : "Assistant"}:
-              </span>
-              <span className="ml-2">{msg.content}</span>
+              {msg.role !== "system" && (
+                <span className="font-medium">
+                  {msg.role === "user" ? "You" : "Assistant"}:
+                </span>
+              )}
+              <span className={msg.role === "system" ? "" : "ml-2"}>{msg.content}</span>
             </div>
           ))}
           {messages.length === 0 && (

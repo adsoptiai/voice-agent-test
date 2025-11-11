@@ -1,5 +1,7 @@
 "use server";
 
+import { REALTIME_CONFIG } from "@/config/realtime";
+
 export async function getSessionToken() {
   const apiKey = process.env.OPENAI_API_KEY;
 
@@ -15,7 +17,7 @@ export async function getSessionToken() {
 
   try {
     // 使用 fetch 直接呼叫 API
-    const response = await fetch("https://api.openai.com/v1/realtime/sessions", {
+    const response = await fetch(REALTIME_CONFIG.sessionApiUrl, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${apiKey}`,
@@ -23,9 +25,9 @@ export async function getSessionToken() {
         "OpenAI-Beta": "realtime=v1"
       },
       body: JSON.stringify({
-        model: "gpt-4o-realtime-preview-2024-10-01",
-        voice: "alloy",
-        instructions: "You are a helpful assistant."
+        model: REALTIME_CONFIG.model,
+        voice: REALTIME_CONFIG.voice,
+        instructions: REALTIME_CONFIG.instructions
       }),
     });
 
